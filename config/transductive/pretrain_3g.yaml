@@ -2,7 +2,8 @@ output_dir: ~/git/ULTRA/output
 
 dataset:
   class: JointDataset
-  graphs: [FB15k237, WN18RR, CoDExMedium]
+  # graphs: [FB15k237, WN18RR, CoDExMedium]
+  graphs: [FB15k237]
   root: ~/git/ULTRA/kg-datasets/
 
 model:
@@ -38,6 +39,7 @@ optimizer:
 train:
   gpus: {{ gpus }}
   batch_size: 64
+  # batch_size: 32
   num_epoch: 10
   log_interval: 800
   batch_per_epoch: 80000
