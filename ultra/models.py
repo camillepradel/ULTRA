@@ -1,8 +1,72 @@
+import numpy as np
 import torch
-from torch import nn
+from torch import Tensor, nn
+import torch.nn.functional as F
+from torch_geometric.data.hetero_data import HeteroData
+from torch_geometric.nn import SAGEConv, to_hetero
+
 
 from . import tasks, layers
 from ultra.base_nbfnet import BaseNBFNet
+
+class GNN(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super().__init__()
+        self.conv1 = SAGEConv(hidden_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
+        self.conv3 = SAGEConv(hidden_channels, hidden_channels)
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = self.conv3(x, edge_index)
+        return x
+
+
+class ReiFM(nn.Module):
+
+    def __init__(self, data: HeteroData, hidden_channels=64):
+        # kept that because super Ultra sounds cool
+        super(ReiFM, self).__init__()
+        
+        std = 1 / np.sqrt(hidden_channels)  # initialization recipe traken from https://stackoverflow.com/a/55546528
+        self.node_instance_repr = nn.Parameter(torch.randn(hidden_channels) * std)
+        self.node_type_repr = nn.Parameter(torch.randn(hidden_channels) * std)
+        self.relation_instance_repr = nn.Parameter(torch.randn(hidden_channels) * std)
+        self.relation_type_repr = nn.Parameter(torch.randn(hidden_channels) * std)
+        
+        self.gnn = GNN(hidden_channels)
+        # Convert GNN model into a heterogeneous variant:
+        self.gnn = to_hetero(self.gnn, metadata=data.metadata())
+
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_channels * 3, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1),
+            nn.Sigmoid(),
+        )
+
+        
+    def forward(self, batch):
+        x_dict = {
+          "node_instance": self.node_instance_repr.expand(batch["node_instance"].num_nodes, -1),
+          "node_type": self.node_type_repr.expand(batch["node_type"].num_nodes, -1),
+          "relation_instance": self.relation_instance_repr.expand(batch["relation_instance"].num_nodes, -1),
+          "relation_type": self.relation_type_repr.expand(batch["relation_type"].num_nodes, -1),
+        } 
+        # `x_dict` holds feature matrices of all node types
+        # `edge_index_dict` holds all edge indices of all edge types
+        x_dict = self.gnn(x_dict, batch.edge_index_dict)
+        
+        if not hasattr(batch["relation_type"], "num_sampled_nodes"):
+            return x_dict
+        
+        # total number of triples to predict (positive or negative)
+        total_triples_count = batch["relation_type"].num_sampled_nodes[0]  # or batch_size + (1+num_negative)
+        pred = self.mlp(
+            torch.cat((x_dict["node_instance"][:total_triples_count], x_dict["node_instance"][total_triples_count:total_triples_count*2], x_dict["relation_instance"][:total_triples_count]), dim=1)
+        )
+        return pred.squeeze(1)
+
 
 class Ultra(nn.Module):
 

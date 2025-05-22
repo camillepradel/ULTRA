@@ -10,7 +10,10 @@
             "request": "launch",
             "program": "${workspaceFolder}/script/run.py",
             "console": "integratedTerminal",
-            "args": "-c /workspaces/ULTRA/config/inductive/inference.yaml --dataset FB15k237Inductive --version v1 --epochs 1 --bpe null --gpus [0] --ckpt null"
+            "args": "-c /workspaces/ULTRA/config/inductive/inference.yaml --dataset FB15k237Inductive --version v1 --epochs 10 --bpe null --gpus [0] --ckpt null",
+            "env": {
+                "CUDA_LAUNCH_BLOCKING": "1"
+            }
         },
         {
             "name": "pretrain",

@@ -8,7 +8,7 @@ dependencies = [
     "torch==2.1.2+cu118",
     "torchvision",
     "torchaudio==2.1.2+cu118",
-    "pyg-lib",
+    "pyg-lib>=0.3,<0.4", # <0.4.0 because of old torch-geometric
     "torch-scatter",
     "torch-sparse",
     "torch-cluster",

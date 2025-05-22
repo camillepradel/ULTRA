@@ -38,3 +38,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync
+
+# Install locally cloned pytorch-geometric in edit mode
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pytorch_geometric,target=pytorch_geometric \
+    uv pip install -e ./pytorch_geometric/

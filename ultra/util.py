@@ -152,8 +152,8 @@ def build_dataset(cfg):
         logger.warning("%s dataset" % (cls if "version" not in cfg.dataset else f'{cls}({cfg.dataset.version})'))
         if cls != "JointDataset":
             logger.warning("#train: %d, #valid: %d, #test: %d" %
-                        (dataset[0].target_edge_index.shape[1], dataset[1].target_edge_index.shape[1],
-                            dataset[2].target_edge_index.shape[1]))
+                        (dataset.train_data.target_edge_index.shape[1], dataset.valid_data.target_edge_index.shape[1],
+                            dataset.test_data.target_edge_index.shape[1]))
         else:
             logger.warning("#train: %d, #valid: %d, #test: %d" %
                            (sum(d.target_edge_index.shape[1] for d in dataset._data[0]),
