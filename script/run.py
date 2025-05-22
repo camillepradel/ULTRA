@@ -5,17 +5,19 @@ import pprint
 from itertools import islice
 
 import torch
-import torch_geometric as pyg
 from torch import optim
 from torch import nn
 from torch.nn import functional as F
 from torch import distributed as dist
 from torch.utils import data as torch_data
 from torch_geometric.data import Data
+# from torch_geometric.sampler import NeighborSampler
+from torch_geometric.loader import NeighborLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from script.reified_link_neighbor_loader import ReifiedLinkNeighborLoader
 from ultra import tasks, util
-from ultra.models import Ultra
+from ultra.models import ReiFM, Ultra
 
 
 separator = ">" * 30
@@ -32,6 +34,29 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
     train_triplets = torch.cat([train_data.target_edge_index, train_data.target_edge_type.unsqueeze(0)]).t()
     sampler = torch_data.DistributedSampler(train_triplets, world_size, rank)
     train_loader = torch_data.DataLoader(train_triplets, cfg.train.batch_size, sampler=sampler)
+    
+    # neighbor_sampler = NeighborSampler(
+    #     train_data,
+    #     num_neighbors={
+    #         "node_instance": [10, 10, 10],
+    #         "node_type": [30, 30, 30],
+    #         "relation_instance": [-1, -1, -1],
+    #         "relation_type": [30, 30, 30],
+    #     },
+    # )
+    reified_link_neighbor_loader = ReifiedLinkNeighborLoader(
+        train_data,
+        num_neighbors={
+            "node_instance": [10, 10, 10],
+            "node_type": [30, 30, 30],
+            "relation_instance": [-1, -1, -1],
+            "relation_type": [30, 30, 30],
+        },
+        # input_nodes=
+    )
+    
+    for batch in reified_link_neighbor_loader:
+        print(batch)
 
     batch_per_epoch = batch_per_epoch or len(train_loader)
 
@@ -63,6 +88,9 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
             for batch in islice(train_loader, batch_per_epoch):
                 batch = tasks.negative_sampling(train_data, batch, cfg.task.num_negative,
                                                 strict=cfg.task.strict_negative)
+                
+                
+                
                 pred = parallel_model(train_data, batch)
                 target = torch.zeros_like(pred)
                 target[:, 0] = 1
@@ -242,13 +270,13 @@ if __name__ == "__main__":
     task_name = cfg.task["name"]
     dataset = util.build_dataset(cfg)
     device = util.get_device(cfg)
-    
-    train_data, valid_data, test_data = dataset[0], dataset[1], dataset[2]
+
+    train_data, valid_data, test_data = dataset.train_data, dataset.valid_data, dataset.test_data
     train_data = train_data.to(device)
     valid_data = valid_data.to(device)
     test_data = test_data.to(device)
 
-    model = Ultra(
+    model = ReiFM(
         rel_model_cfg=cfg.model.relation_model,
         entity_model_cfg=cfg.model.entity_model,
     )
@@ -272,23 +300,27 @@ if __name__ == "__main__":
             test_filtered_data = Data(edge_index=full_inference_edges, edge_type=full_inference_etypes, num_nodes=test_data.num_nodes)
             val_filtered_data = test_filtered_data
         else:
-            # test filtering graph: inference edges + test edges
-            full_inference_edges = torch.cat([test_data.edge_index, test_data.target_edge_index], dim=1)
-            full_inference_etypes = torch.cat([test_data.edge_type, test_data.target_edge_type])
-            test_filtered_data = Data(edge_index=full_inference_edges, edge_type=full_inference_etypes, num_nodes=test_data.num_nodes)
+            # # test filtering graph: inference edges + test edges
+            # test_filtered_data = Data(
+            #     edge_index=torch.cat([test_data.edge_index, test_data.target_edge_index], dim=1),
+            #     edge_type=torch.cat([test_data.edge_type, test_data.target_edge_type]),
+            #     num_nodes=test_data.num_nodes
+            # )
 
-            # validation filtering graph: train edges + validation edges
-            val_filtered_data = Data(
-                edge_index=torch.cat([train_data.edge_index, valid_data.target_edge_index], dim=1),
-                edge_type=torch.cat([train_data.edge_type, valid_data.target_edge_type])
-            )
+            # # validation filtering graph: train edges + validation edges
+            # val_filtered_data = Data(
+            #     edge_index=torch.cat([train_data.edge_index, valid_data.target_edge_index], dim=1),
+            #     edge_type=torch.cat([train_data.edge_type, valid_data.target_edge_type])
+            # )
+            
+            val_filtered_data = test_filtered_data = None # TODO
     else:
         # for transductive setting, use the whole graph for filtered ranking
         filtered_data = Data(edge_index=dataset._data.target_edge_index, edge_type=dataset._data.target_edge_type, num_nodes=dataset[0].num_nodes)
         val_filtered_data = test_filtered_data = filtered_data
     
-    val_filtered_data = val_filtered_data.to(device)
-    test_filtered_data = test_filtered_data.to(device)
+    # val_filtered_data = val_filtered_data.to(device)
+    # test_filtered_data = test_filtered_data.to(device)
     
     train_and_validate(cfg, model, train_data, valid_data, filtered_data=val_filtered_data, device=device, batch_per_epoch=cfg.train.batch_per_epoch, logger=logger)
     if util.get_rank() == 0:

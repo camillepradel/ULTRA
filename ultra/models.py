@@ -4,6 +4,27 @@ from torch import nn
 from . import tasks, layers
 from ultra.base_nbfnet import BaseNBFNet
 
+class ReiFM(nn.Module):
+
+    def __init__(self, rel_model_cfg, entity_model_cfg):
+        # kept that because super Ultra sounds cool
+        super(ReiFM, self).__init__()
+
+        # adding a bit more flexibility to initializing proper rel/ent classes from the configs
+        self.relation_model = globals()[rel_model_cfg.pop('class')](**rel_model_cfg)
+        self.entity_model = globals()[entity_model_cfg.pop('class')](**entity_model_cfg)
+
+        
+    def forward(self, data, batch):
+        
+        # batch shape: (bs, 1+num_negs, 3)
+        # relations are the same all positive and negative triples, so we can extract only one from the first triple among 1+nug_negs
+        query_rels = batch[:, 0, 2]
+        relation_representations = self.relation_model(data.relation_graph, query=query_rels)
+        score = self.entity_model(data, relation_representations, batch)
+        
+        return score
+
 class Ultra(nn.Module):
 
     def __init__(self, rel_model_cfg, entity_model_cfg):
