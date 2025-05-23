@@ -1,0 +1,15 @@
+services:
+
+  ultra:
+    image: 'ultra:latest'
+    restart: always
+
+    build:
+      dockerfile: .devcontainer/Dockerfile
+      context: ..
+    
+    command: sleep infinity
+
+    volumes:
+      - ..:/workspaces/ULTRA
+      - /workspaces/ULTRA/.venv

@@ -1,0 +1,44 @@
+[project]
+name = "ULTRA"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9,<3.12"
+dependencies = [
+    "torch==2.1.2+cu118",
+    "torchvision",
+    "torchaudio==2.1.2+cu118",
+    "pyg-lib",
+    "torch-scatter",
+    "torch-sparse",
+    "torch-cluster",
+    "torch-spline-conv",
+    "torch-geometric==2.4.0",
+    "numpy>=1.26.4,<2",
+    "ninja",
+    "easydict",
+    "pyyaml",
+    "packaging>=25.0",
+    "setuptools>=80.8.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch_cu118" }
+torchvision = { index = "pytorch_cu118" }
+torchaudio = { index = "pytorch_cu118" }
+pyg-lib = { index = "pyg_cu118" }
+torch-scatter = { index = "pyg_cu118" }
+torch-sparse = { index = "pyg_cu118" }
+torch-cluster = { index = "pyg_cu118" }
+torch-spline-conv = { index = "pyg_cu118" }
+
+[[tool.uv.index]]
+name = "pyg_cu118"
+url = "https://data.pyg.org/whl/torch-2.1.2+cu118.html"
+explicit = true
+format = "flat"
+
+[[tool.uv.index]]
+name = "pytorch_cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
