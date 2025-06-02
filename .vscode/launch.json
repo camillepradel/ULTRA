@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/script/run.py",
             "console": "integratedTerminal",
-            "args": "-c /workspaces/ULTRA/config/inductive/inference.yaml --dataset FB15k237Inductive --version v1 --epochs 10 --bpe null --gpus [0] --ckpt null",
+            "args": "-c ${workspaceFolder}/config/inductive/inference.yaml --dataset FB15k237Inductive --version v1 --epochs 10 --bpe null --gpus null --ckpt null",
             "env": {
                 "CUDA_LAUNCH_BLOCKING": "1"
             }
@@ -21,7 +21,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/script/pretrain.py",
             "console": "integratedTerminal",
-            "args": "-c /workspaces/ULTRA/config/transductive/pretrain_3g.yaml --gpus [0]"
+            "args": "-c ${workspaceFolder}/config/transductive/pretrain_3g.yaml --gpus [0]"
         },
         {
             "name": "Run ULTRA",
@@ -29,7 +29,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/script/run.py",
             "console": "integratedTerminal",
-            "args": "python script/run.py -c config/transductive/inference.yaml --dataset CoDExSmall --epochs 0 --bpe null --gpus [0] --ckpt ${workspaceFolder}/ckpts/ultra_4g.pth"
+            "args": "python script/run.py -c ${workspaceFolder}/config/transductive/inference.yaml --dataset CoDExSmall --epochs 0 --bpe null --gpus [0] --ckpt ${workspaceFolder}/ckpts/ultra_4g.pth"
         }
     ]
 }

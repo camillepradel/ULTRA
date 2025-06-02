@@ -1,7 +1,10 @@
 from functools import reduce
 from torch_scatter import scatter_add
 from torch_geometric.data import Data, HeteroData
+from torch_geometric.data.datapipes import functional_transform
+from torch_geometric.transforms import BaseTransform
 import torch
+from typing import Any
 
 
 def edge_match(edge_index, query_index):
@@ -206,114 +209,98 @@ def build_relation_graph(graph):
     return graph
 
 
-def build_reified_graph(graph):
-
-    original_edge_index, original_edge_type = graph.edge_index, graph.edge_type
-    original_num_node_instances = graph.num_nodes
-    original_num_rel_types = graph.num_relations
-    original_num_rel_instances = original_edge_index.shape[1]
-    original_heads = original_edge_index[0]
-    original_tails = original_edge_index[1]
-    device = original_edge_index.device
-    
-    # node types:
-    # NODE_INSTANCE = 0
-    # NODE_TYPE = 1
-    # RELATION_INSTANCE = 2
-    # RELATION_TYPE = 3
-    NODE_INSTANCE = "node_instance"
-    NODE_TYPE = "node_type"
-    RELATION_INSTANCE = "relation_instance"
-    RELATION_TYPE = "relation_type"
-
-    # relation types:
-    # HAS_TYPE = 0
-    # HAS_INSTANCE = 1
-    # HAS_HEAD = 2
-    # IS_HEAD_OF = 3
-    # HAS_TAIL = 4
-    # IS_TAIL_OF = 5
-    HAS_TYPE = "has_type"
-    HAS_INSTANCE = "has_instance"
-    HAS_HEAD = "has_head"
-    IS_HEAD_OF = "is_head_of"
-    HAS_TAIL = "has_tail"
-    IS_TAIL_OF = "is_tail_of"
-
-    # reified_edge_index = []
-    # reified_edge_type = []
-    # reified_node_type = []
-    
-    # reified node nodes
-    
-    # nodes from the original graph are now node instances
-    # reified_node_type.extend([NODE_INSTANCE] * original_num_node_instances)
-    
-    # create a node_type node for each node type
-    # TODO: support as input heterogeneous graphs where there is multiple node types
-    # reified_node_type_index = len(reified_node_type)
-    # reified_node_type.append(NODE_TYPE)
-
-    # create relations to state the type of each node_instance node
-    # reified_edge_index.extend([(node_instance_index, reified_node_type_index) for node_instance_index in range(original_num_node_instances)])
-    # reified_edge_index.extend([(reified_node_type_index, node_instance_index) for node_instance_index in range(original_num_node_instances)])
-    # reified_edge_type.extend([HAS_TYPE] * original_num_node_instances + [HAS_INSTANCE] * original_num_node_instances)
-
-    # reified relation nodes
-
-    # create a relation_instance node for each relation
-    # reified_first_relation_instance_index = len(reified_node_type)
-    # reified_node_type.extend([RELATION_INSTANCE] * original_num_rel_instances)
-
-    # create a relation_type node for each relation type
-    # reified_first_relation_type_index = len(reified_node_type)
-    # reified_node_type.extend([RELATION_TYPE] * original_num_rel_types)
-
-    # create relations to state the type of each relation_type node
-    # reified_edge_index.extend([(reified_first_relation_instance_index + relation_instance_index, reified_first_relation_type_index + original_edge_type[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_index.extend([(reified_first_relation_type_index + original_edge_type[relation_instance_index], reified_first_relation_instance_index + relation_instance_index) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_type.extend([HAS_TYPE] * original_num_rel_instances + [HAS_INSTANCE] * original_num_rel_instances)
-
-    # reification relations
-    # reified_edge_index.extend([(reified_first_relation_instance_index + relation_instance_index, original_heads[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_index.extend([(original_heads[relation_instance_index], reified_first_relation_instance_index + relation_instance_index) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_type.extend([HAS_HEAD] * original_num_rel_instances + [IS_HEAD_OF] * original_num_rel_instances)
-    # reified_edge_index.extend([(reified_first_relation_instance_index + relation_instance_index, original_tails[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_index.extend([(original_tails[relation_instance_index], reified_first_relation_instance_index + relation_instance_index) for relation_instance_index in range(original_num_rel_instances)])
-    # reified_edge_type.extend([HAS_TAIL] * original_num_rel_instances + [IS_TAIL_OF] * original_num_rel_instances)
-    
-    # reified graph
-    # reified_edge_index = torch.tensor(reified_edge_index, dtype=torch.long, device=device).T
-    # reified_edge_type = torch.tensor(reified_edge_type, dtype=torch.long, device=device)
-    # reified_node_type = torch.tensor(reified_node_type, dtype=torch.long, device=device)
-    # num_reified_nodes = len(reified_node_type)
-    # num_reified_edges = len(reified_edge_index[0])
-    
-    reified_graph = HeteroData(
-        target_edge_index=graph.target_edge_index,
-        target_edge_type=graph.target_edge_type,
-    )
-
-    # TODO: make sure saving node indices (each line below with ...node_id = torch.arange(...)) is useful
-
-    # create nodes in the reified graph for each node of the original graph
-    reified_graph[NODE_INSTANCE].node_id = torch.arange(original_num_node_instances)
-    reified_graph[NODE_TYPE].node_id = torch.arange(1) # TODO: support as input heterogeneous graphs where there is multiple node types
-    reified_graph[NODE_INSTANCE, HAS_TYPE, NODE_TYPE].edge_index = torch.tensor([(node_instance_index, 0) for node_instance_index in range(original_num_node_instances)], dtype=torch.long, device=device).T
-    reified_graph[NODE_TYPE, HAS_INSTANCE, NODE_INSTANCE].edge_index = torch.tensor([(0, node_instance_index) for node_instance_index in range(original_num_node_instances)], dtype=torch.long, device=device).T
-
-    # create nodes in the reified graph for each relation of the original graph
-    reified_graph[RELATION_INSTANCE].node_id = torch.arange(original_num_rel_instances)
-    reified_graph[RELATION_TYPE].node_id = torch.arange(original_num_rel_types)
-    reified_graph[RELATION_INSTANCE, HAS_TYPE, RELATION_TYPE].edge_index = torch.tensor([(relation_instance_index, original_edge_type[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-    reified_graph[RELATION_TYPE, HAS_INSTANCE, RELATION_INSTANCE].edge_index = torch.tensor([(original_edge_type[relation_instance_index], relation_instance_index) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-
-    # add head/tail relation in the reified graph to reproduce relations from the original graph
-    reified_graph[RELATION_INSTANCE, HAS_HEAD, NODE_INSTANCE].edge_index = torch.tensor([(relation_instance_index, original_heads[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-    reified_graph[NODE_INSTANCE, IS_HEAD_OF, RELATION_INSTANCE].edge_index = torch.tensor([(original_heads[relation_instance_index], relation_instance_index) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-    reified_graph[RELATION_INSTANCE, HAS_TAIL, NODE_INSTANCE].edge_index = torch.tensor([(relation_instance_index, original_tails[relation_instance_index]) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-    reified_graph[NODE_INSTANCE, IS_TAIL_OF, RELATION_INSTANCE].edge_index = torch.tensor([(original_tails[relation_instance_index], relation_instance_index) for relation_instance_index in range(original_num_rel_instances)], dtype=torch.long, device=device).T
-
-    return reified_graph
+class ReifiedGraph(HeteroData):
+    """
+    TODO: remove class if no specific behaviour is needed
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
+@functional_transform('to_reified_graph')
+class ToReifiedGraph(BaseTransform):
+    """
+    """
+    def __init__(self):
+        pass
+
+    def forward(
+        self,
+        data: HeteroData,
+        to_homogeneous_kwargs: dict[str, Any] | None = None,
+    ) -> ReifiedGraph:
+        """
+        Convert a heterogeneous graph to a reified graph.
+        TODO: describe transformation process
+        Warning: the combination of features accross different node/relation types is handled by to_homogeneous(), and thus having a same feature name for a node and a relation is not supported
+
+        Args:
+            data: The heterogeneous graph to convert.
+            to_homogeneous_kwargs: Keyword arguments to pass to to_homogeneous().
+        """
+        # we can use node_types because it returns types in the same order as num_nodes_dict (used in to_homogeneous() below)
+        node_types = list(data.node_types)
+        # we use collect() to make sure we have the same order as the one used in to_homogeneous() below
+        relation_types = list(data.collect('edge_index', True).keys())
+
+        if not node_types or not relation_types:
+            raise ValueError("The input graph must have at least one node type and one relation type.")
+
+        # we use to_homogeneous() to merge attributes of nodes of different types
+        to_homogeneous_kwargs = to_homogeneous_kwargs or {}
+        homo_data = data.to_homogeneous(**to_homogeneous_kwargs)
+        device = homo_data.edge_index.device
+        
+        reified_graph = ReifiedGraph(
+            node_types=node_types,
+            relation_types=relation_types,
+        )
+
+        # create nodes in the reified graph for each node of the original graph
+        # node_instance nodes
+        reified_graph["node_instance"].num_nodes = homo_data.num_nodes
+        for attr_name in homo_data.node_attrs():
+            if attr_name == 'node_type':
+                continue
+            reified_graph["node_instance"][attr_name] = homo_data[attr_name]
+        # node_type nodes
+        reified_graph["node_type"].num_nodes = len(node_types)
+        # node_instance <-> node_type edges
+        node_instance_id = list(range(reified_graph["node_instance"].num_nodes))
+        node_type_id = [node_types.index(node_type) for node_type in node_types for _ in range(data[node_type].num_nodes)]
+        reified_graph["node_instance", "has_type", "node_type"].edge_index = torch.tensor([node_instance_id, node_type_id], dtype=torch.long, device=device)
+        reified_graph["node_type", "has_instance", "node_instance"].edge_index = torch.tensor([node_type_id, node_instance_id], dtype=torch.long, device=device)
+
+        # create nodes in the reified graph for each relation of the original graph
+        # relation_instance nodes
+        reified_graph["relation_instance"].num_nodes = homo_data.num_edges
+        for attr_name in homo_data.edge_attrs():
+            if attr_name == 'edge_type':
+                continue
+            reified_graph["relation_instance"][attr_name] = homo_data[attr_name]
+        # relation_type nodes
+        reified_graph["relation_type"].num_nodes = len(relation_types)
+        # relation_instance <-> relation_type edges
+        relation_instance_id = list(range(reified_graph["relation_instance"].num_nodes))
+        relation_type_id = [relation_types.index(relation_type) for relation_type, num_edges in data.num_edges_dict.items() for _ in range(num_edges)]
+        reified_graph["relation_instance", "has_type", "relation_type"].edge_index = torch.tensor([relation_instance_id, relation_type_id], dtype=torch.long, device=device)
+        reified_graph["relation_type", "has_instance", "relation_instance"].edge_index = torch.tensor([relation_type_id, relation_instance_id], dtype=torch.long, device=device)
+
+        # add head/tail relation in the reified graph to reproduce relations from the original graph
+        node_type_offset = {}
+        current_offset = 0
+        for node_type, num_nodes in data.num_nodes_dict.items():
+            node_type_offset[node_type] = current_offset
+            current_offset += num_nodes
+        head_id, tail_id = [], []
+        for relation_type in relation_types:
+            head_type = relation_type[0]
+            tail_type = relation_type[2]
+            head_id.extend((node_type_offset[head_type] + data[relation_type].edge_index[0]).tolist())
+            tail_id.extend((node_type_offset[tail_type] + data[relation_type].edge_index[1]).tolist())
+        reified_graph["relation_instance", "has_head", "node_instance"].edge_index = torch.tensor([relation_instance_id, head_id], dtype=torch.long, device=device)
+        reified_graph["node_instance", "is_head_of", "relation_instance"].edge_index = torch.tensor([head_id, relation_instance_id], dtype=torch.long, device=device)
+        reified_graph["relation_instance", "has_tail", "node_instance"].edge_index = torch.tensor([relation_instance_id, tail_id], dtype=torch.long, device=device)
+        reified_graph["node_instance", "is_tail_of", "relation_instance"].edge_index = torch.tensor([tail_id, relation_instance_id], dtype=torch.long, device=device)
+
+        return reified_graph
