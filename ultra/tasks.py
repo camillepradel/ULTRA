@@ -211,10 +211,23 @@ def build_relation_graph(graph):
 
 class ReifiedGraph(HeteroData):
     """
-    TODO: remove class if no specific behaviour is needed
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, original_node_types: list[str], original_relation_types: list[str], *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.original_node_types: list[str] = original_node_types
+        self.original_relation_types: list[str] = original_relation_types
+    
+    def get_relation_instance_repr(self, relation_instance_id: int) -> str:
+        """
+        Returns a string representation of a relation instance.
+        Utility function. Can be used for debugging.
+        """
+        head_id = self["has_head"].edge_index[:, self["has_head"].edge_index[0] == relation_instance_id][1, 0].item()
+        tail_id = self["has_tail"].edge_index[:, self["has_tail"].edge_index[0] == relation_instance_id][1, 0].item()
+        relation_type_id = self[("relation_instance", "has_type", "relation_type")].edge_index[:, self[("relation_instance", "has_type", "relation_type")].edge_index[0] == relation_instance_id][1, 0].item()
+        head_type_id = self[("node_instance", "has_type", "node_type")].edge_index[:, self[("node_instance", "has_type", "node_type")].edge_index[0] == head_id][1, 0].item()
+        tail_type_id = self[("node_instance", "has_type", "node_type")].edge_index[:, self[("node_instance", "has_type", "node_type")].edge_index[0] == tail_id][1, 0].item()
+        return f"({head_id}: {self.original_node_types[head_type_id]}) -[{relation_instance_id}:  {self.original_relation_types[relation_type_id][1]}]-> ({tail_id}: {self.original_node_types[tail_type_id]})"
 
 
 @functional_transform('to_reified_graph')
@@ -232,7 +245,9 @@ class ToReifiedGraph(BaseTransform):
         """
         Convert a heterogeneous graph to a reified graph.
         TODO: describe transformation process
-        Warning: the combination of features accross different node/relation types is handled by to_homogeneous(), and thus having a same feature name for a node and a relation is not supported
+        Warning:
+         - the combination of features accross different node/relation types is handled by to_homogeneous(), and thus having a same feature name for a node and a relation is not supported
+         - input graph must not contain reverse edges (e.g. head to tail and tail to head)
 
         Args:
             data: The heterogeneous graph to convert.
@@ -252,8 +267,8 @@ class ToReifiedGraph(BaseTransform):
         device = homo_data.edge_index.device
         
         reified_graph = ReifiedGraph(
-            node_types=node_types,
-            relation_types=relation_types,
+            original_node_types=node_types,
+            original_relation_types=relation_types,
         )
 
         # create nodes in the reified graph for each node of the original graph

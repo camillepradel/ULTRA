@@ -151,9 +151,11 @@ def build_dataset(cfg):
     if get_rank() == 0:
         logger.warning("%s dataset" % (cls if "version" not in cfg.dataset else f'{cls}({cfg.dataset.version})'))
         if cls != "JointDataset":
-            logger.warning("#train: %d, #valid: %d, #test: %d" %
-                        (dataset.train_data.target_edge_index.shape[1], dataset.valid_data.target_edge_index.shape[1],
-                            dataset.test_data.target_edge_index.shape[1]))
+            logger.warning("#train: %d (fact: %d, target: %d), #valid: %d (fact: %d, target: %d), #test: %d (fact: %d, target: %d)" %
+                        (torch.logical_or(dataset[0]["relation_instance"].train_fact_mask, dataset[0]["relation_instance"].train_target_mask).sum().item(), dataset[0]["relation_instance"].train_fact_mask.sum().item(), dataset[0]["relation_instance"].train_target_mask.sum().item(),
+                        torch.logical_or(dataset[0]["relation_instance"].valid_fact_mask, dataset[0]["relation_instance"].valid_target_mask).sum().item(), dataset[0]["relation_instance"].valid_fact_mask.sum().item(), dataset[0]["relation_instance"].valid_target_mask.sum().item(),
+                        torch.logical_or(dataset[0]["relation_instance"].test_fact_mask, dataset[0]["relation_instance"].test_target_mask).sum().item(), dataset[0]["relation_instance"].test_fact_mask.sum().item(), dataset[0]["relation_instance"].test_target_mask.sum().item(),
+                        ))
         else:
             logger.warning("#train: %d, #valid: %d, #test: %d" %
                            (sum(d.target_edge_index.shape[1] for d in dataset._data[0]),

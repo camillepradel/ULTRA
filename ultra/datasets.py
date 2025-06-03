@@ -1,16 +1,15 @@
 import os
-import csv
 import shutil
 import torch
-from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip
+from torch_geometric.data import Data, HeteroData, InMemoryDataset, download_url, extract_zip
 from torch_geometric.datasets import RelLinkPredDataset, WordNet18RR
 
-from ultra.tasks import build_relation_graph, build_reified_graph
+from ultra.tasks import build_relation_graph, ToReifiedGraph
 
 
 class GrailInductiveDataset(InMemoryDataset):
 
-    def __init__(self, root, version, transform=None, pre_transform=build_reified_graph, merge_valid_test=True):
+    def __init__(self, root, version, transform=None, pre_transform=ToReifiedGraph(), merge_valid_test=True):
         self.version = version
         assert version in ["v1", "v2", "v3", "v4"]
 
@@ -21,13 +20,11 @@ class GrailInductiveDataset(InMemoryDataset):
         self.merge_valid_test = merge_valid_test
         # TODO: implement reification and apply it as pre_transform
         super().__init__(root, transform, pre_transform)
-        self.train_data = torch.load(self.processed_paths[0])
-        self.valid_data = torch.load(self.processed_paths[1])
-        self.test_data = torch.load(self.processed_paths[2])
+        self.data = torch.load(self.processed_paths[0])
 
-    @property
-    def num_relations(self):
-        return self.train_data.relation_type.node_id.shape[0]
+    # @property
+    # def num_relations(self):
+    #     return self.train_data.relation_type.node_id.shape[0]
 
     @property
     def raw_dir(self):
@@ -39,7 +36,7 @@ class GrailInductiveDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        return ["train_data.pt", "valid_data.pt", "test_data.pt"]
+        return ["data.pt"]
 
     @property
     def raw_file_names(self):
@@ -53,47 +50,30 @@ class GrailInductiveDataset(InMemoryDataset):
             os.rename(download_path, path)
 
     def process(self):
-        # TODO: check what is happening here and find out whether it is compatible with the reification -> it's ok
-        test_files = self.raw_paths[:3]
-        train_files = self.raw_paths[3:]
-
-        inv_train_entity_vocab = {}
-        inv_test_entity_vocab = {}
+        inv_entity_vocab = {}
         inv_relation_vocab = {}
+        entities = []
+        relations = []
         triplets = []
         num_samples = []
 
-        for txt_file in train_files:
+        for txt_file in self.raw_paths:
             with open(txt_file, "r") as fin:
                 num_sample = 0
                 for line in fin:
                     h_token, r_token, t_token = line.strip().split("\t")
-                    if h_token not in inv_train_entity_vocab:
-                        inv_train_entity_vocab[h_token] = len(inv_train_entity_vocab)
-                    h = inv_train_entity_vocab[h_token]
+                    if h_token not in inv_entity_vocab:
+                        inv_entity_vocab[h_token] = len(inv_entity_vocab)
+                        entities.append(h_token)
+                    h = inv_entity_vocab[h_token]
                     if r_token not in inv_relation_vocab:
                         inv_relation_vocab[r_token] = len(inv_relation_vocab)
+                        relations.append(r_token)
                     r = inv_relation_vocab[r_token]
-                    if t_token not in inv_train_entity_vocab:
-                        inv_train_entity_vocab[t_token] = len(inv_train_entity_vocab)
-                    t = inv_train_entity_vocab[t_token]
-                    triplets.append((h, t, r))
-                    num_sample += 1
-            num_samples.append(num_sample)
-
-        for txt_file in test_files:
-            with open(txt_file, "r") as fin:
-                num_sample = 0
-                for line in fin:
-                    h_token, r_token, t_token = line.strip().split("\t")
-                    if h_token not in inv_test_entity_vocab:
-                        inv_test_entity_vocab[h_token] = len(inv_test_entity_vocab)
-                    h = inv_test_entity_vocab[h_token]
-                    assert r_token in inv_relation_vocab
-                    r = inv_relation_vocab[r_token]
-                    if t_token not in inv_test_entity_vocab:
-                        inv_test_entity_vocab[t_token] = len(inv_test_entity_vocab)
-                    t = inv_test_entity_vocab[t_token]
+                    if t_token not in inv_entity_vocab:
+                        inv_entity_vocab[t_token] = len(inv_entity_vocab)
+                        entities.append(t_token)
+                    t = inv_entity_vocab[t_token]
                     triplets.append((h, t, r))
                     num_sample += 1
             num_samples.append(num_sample)
@@ -101,67 +81,48 @@ class GrailInductiveDataset(InMemoryDataset):
 
         edge_index = triplets[:, :2].t()
         edge_type = triplets[:, 2]
-        num_relations = int(edge_type.max()) + 1
 
-        # creating fact graphs - those are graphs sent to a model, based on which we'll predict missing facts
-        # also, those fact graphs will be used for filtered evaluation
-        train_fact_slice = slice(None, sum(num_samples[:1])) # train.txt
-        test_fact_slice = slice(sum(num_samples[:2]), sum(num_samples[:3])) # train_ind.txt
-        train_fact_index = edge_index[:, train_fact_slice]
-        train_fact_type = edge_type[train_fact_slice]
-        test_fact_index = edge_index[:, test_fact_slice]
-        test_fact_type = edge_type[test_fact_slice]
+        data = HeteroData()
+        data['entity'].num_nodes = len(inv_entity_vocab)
 
-        # # add flipped triplets for the fact graphs -> not needed for reification approach
-        # train_fact_index = torch.cat([train_fact_index, train_fact_index.flip(0)], dim=-1)
-        # train_fact_type = torch.cat([train_fact_type, train_fact_type + num_relations])
-        # test_fact_index = torch.cat([test_fact_index, test_fact_index.flip(0)], dim=-1)
-        # test_fact_type = torch.cat([test_fact_type, test_fact_type + num_relations])
+        # build masks to differentiate between {train, valid, test} and {fact, target} samples
+        train_fact_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        valid_fact_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        test_fact_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        train_target_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        valid_target_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        test_target_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+        train_fact_mask[sum(num_samples[:3]):sum(num_samples[:4])] = True # train.txt
+        valid_fact_mask[sum(num_samples[:3]):sum(num_samples[:4])] = True # train.txt TODO: make sure this is the right slice
+        test_fact_mask[sum(num_samples[:0]):sum(num_samples[:1])] = True # train_ind.txt
+        train_target_mask[sum(num_samples[:3]):sum(num_samples[:4])] = True # train.txt
+        valid_target_mask[sum(num_samples[:4]):sum(num_samples[:5])] = True # valid.txt
+        if self.merge_valid_test:
+            test_target_mask[sum(num_samples[:1]):sum(num_samples[:3])] = True  # valid_ind.txt + test_ind.txt
+        else:
+            test_target_mask[sum(num_samples[:2]):sum(num_samples[:3])] = True  # test_ind.txt
 
-        train_slice = slice(None, sum(num_samples[:1])) # train.txt
-        valid_slice = slice(sum(num_samples[:1]), sum(num_samples[:2])) # valid.txt
-        # by default, SOTA models on Grail datasets merge inductive valid and test splits as the final test split
-        # with this choice, the validation set is that of the transductive train (on the seen graph)
-        # by default it's turned on but you can experiment with turning this option off
-        test_slice = slice(sum(num_samples[:3]), sum(num_samples)) if self.merge_valid_test \
-                    else slice(sum(num_samples[:4]), sum(num_samples))
-                    # valid_ind.txt + test_ind.txt if self.merge_valid_test
-                    # else test_ind.txt
-        
-        train_data = Data(
-            edge_index=train_fact_index, # train.txt
-            edge_type=train_fact_type, # train.txt
-            num_nodes=len(inv_train_entity_vocab), # train.txt + valid.txt
-            target_edge_index=edge_index[:, train_slice], # train.txt
-            target_edge_type=edge_type[train_slice], # train.txt
-            num_relations=num_relations*2 # train.txt + valid.txt + train_ind.txt + valid_ind.txt + test_ind.txt
-        )
-        valid_data = Data(
-            edge_index=train_fact_index, # train.txt
-            edge_type=train_fact_type, # train.txt
-            num_nodes=len(inv_train_entity_vocab), # train.txt + valid.txt
-            target_edge_index=edge_index[:, valid_slice], # valid.txt
-            target_edge_type=edge_type[valid_slice], # valid.txt
-            num_relations=num_relations*2 # train.txt + valid.txt + train_ind.txt + valid_ind.txt + test_ind.txt
-        )
-        test_data = Data(
-            edge_index=test_fact_index, # train_ind.txt
-            edge_type=test_fact_type, # train_ind.txt
-            num_nodes=len(inv_test_entity_vocab), # train_ind.txt + valid_ind.txt + test_ind.txt
-            target_edge_index=edge_index[:, test_slice], # valid_ind.txt + test_ind.txt (if self.merge_valid_test)
-            target_edge_type=edge_type[test_slice], # valid_ind.txt + test_ind.txt (if self.merge_valid_test)
-            num_relations=num_relations*2 # train.txt + valid.txt + train_ind.txt + valid_ind.txt + test_ind.txt
-        )
+        for rel_type, rel_id in inv_relation_vocab.items():
+            mask = edge_type == rel_id
+            data['entity', rel_type, 'entity'].edge_index = edge_index[:, mask]
+            data['entity', rel_type, 'entity'].train_fact_mask = train_fact_mask[mask]
+            data['entity', rel_type, 'entity'].valid_fact_mask = valid_fact_mask[mask]
+            data['entity', rel_type, 'entity'].test_fact_mask = test_fact_mask[mask]
+            data['entity', rel_type, 'entity'].train_target_mask = train_target_mask[mask]
+            data['entity', rel_type, 'entity'].valid_target_mask = valid_target_mask[mask]
+            data['entity', rel_type, 'entity'].test_target_mask = test_target_mask[mask]
+
+        # below files are saved to be able to manually asses the correctness of batches
+        # fed to the model during training and inference
+        with open(self.raw_dir + '/entities.txt', 'w') as output_file:
+            output_file.write("\n".join(f"{i}\t{e}" for i, e in enumerate(entities)))
+        with open(self.raw_dir + '/relations.txt', 'w') as output_file:
+            output_file.write("\n".join(f"{i}\t{r}" for i, r in enumerate(relations)))
 
         if self.pre_transform is not None:
-            train_data = self.pre_transform(train_data)
-            valid_data = self.pre_transform(valid_data)
-            test_data = self.pre_transform(test_data)
+            data = self.pre_transform(data)
 
-        # torch.save((self.collate([train_data, valid_data, test_data])), self.processed_paths[0])
-        torch.save(train_data, self.processed_paths[0])
-        torch.save(valid_data, self.processed_paths[1])
-        torch.save(test_data, self.processed_paths[2])
+        torch.save(data, self.processed_paths[0])
 
     def __repr__(self):
         return "%s(%s)" % (self.name, self.version)
