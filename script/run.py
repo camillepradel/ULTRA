@@ -3,6 +3,7 @@ import sys
 import math
 import pprint
 from itertools import islice
+from typing import Literal
 
 import torch
 from torch import optim
@@ -11,20 +12,19 @@ from torch.nn import functional as F
 from torch import distributed as dist
 from torch.utils import data as torch_data
 from torch_geometric.data import Data
-# from torch_geometric.sampler import NeighborSampler
-from torch_geometric.loader import NeighborLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from script.reified_link_neighbor_loader import ReifiedLinkNeighborLoader
+from script.reified_link_neighbor_loader import ReifiedLinkNeighborLoader, get_input_relation_instance_nodes
+from ultra.tasks import ReifiedGraph
 from ultra import tasks, util
-from ultra.models import ReiFM, Ultra
+from ultra.models import ReiFM
 
 
 separator = ">" * 30
 line = "-" * 30
 
 
-def train_and_validate(cfg, model, train_data, valid_data, device, logger, filtered_data=None, batch_per_epoch=None):
+def train_and_validate(cfg, model, data: ReifiedGraph, device, logger, batch_per_epoch=None):
     if cfg.train.num_epoch == 0:
         return
 
@@ -32,17 +32,39 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
     rank = util.get_rank()
     
     train_loader = ReifiedLinkNeighborLoader(
-        train_data,
+        data,
+        # num_neighbors={
+        #     ("node_instance", "has_type", "node_type"): [1, 1, 1],
+        #     ("node_type", "has_instance", "node_instance"): [30, 30, 30],
+        #     ("relation_instance", "has_type", "relation_type"): [1, 1, 1],
+        #     ("relation_type", "has_instance", "relation_instance"): [30, 30, 30],
+        #     ("relation_instance", "has_head", "node_instance"): [1, 1, 1],
+        #     ("node_instance", "is_head_of", "relation_instance"): [10, 10, 10],
+        #     ("relation_instance", "has_tail", "node_instance"): [1, 1, 1],
+        #     ("node_instance", "is_tail_of", "relation_instance"): [10, 10, 10],
+        # },
+        # num_neighbors={
+        #     ("node_instance", "has_type", "node_type"): [-1] * cfg.model.hop_count,
+        #     ("node_type", "has_instance", "node_instance"): [-1] * cfg.model.hop_count,
+        #     ("relation_instance", "has_type", "relation_type"): [-1] * cfg.model.hop_count,
+        #     ("relation_type", "has_instance", "relation_instance"): [-1] * cfg.model.hop_count,
+        #     ("relation_instance", "has_head", "node_instance"): [-1] * cfg.model.hop_count,
+        #     ("node_instance", "is_head_of", "relation_instance"): [-1] * cfg.model.hop_count,
+        #     ("relation_instance", "has_tail", "node_instance"): [-1] * cfg.model.hop_count,
+        #     ("node_instance", "is_tail_of", "relation_instance"): [-1] * cfg.model.hop_count,
+        # },
         num_neighbors={
-            ("node_instance", "has_type", "node_type"): [1, 1, 1],
-            ("node_type", "has_instance", "node_instance"): [30, 30, 30],
-            ("relation_instance", "has_type", "relation_type"): [1, 1, 1],
-            ("relation_type", "has_instance", "relation_instance"): [30, 30, 30],
-            ("relation_instance", "has_head", "node_instance"): [1, 1, 1],
-            ("node_instance", "is_head_of", "relation_instance"): [10, 10, 10],
-            ("relation_instance", "has_tail", "node_instance"): [1, 1, 1],
-            ("node_instance", "is_tail_of", "relation_instance"): [10, 10, 10],
+            ("node_instance", "has_type", "node_type"): [30] * cfg.model.hop_count,
+            ("node_type", "has_instance", "node_instance"): [5] * cfg.model.hop_count,
+            ("relation_instance", "has_type", "relation_type"): [30] * cfg.model.hop_count,
+            ("relation_type", "has_instance", "relation_instance"): [5] * cfg.model.hop_count,
+            ("relation_instance", "has_head", "node_instance"): [10] * cfg.model.hop_count,
+            ("node_instance", "is_head_of", "relation_instance"): [5] * cfg.model.hop_count,
+            ("relation_instance", "has_tail", "node_instance"): [10] * cfg.model.hop_count,
+            ("node_instance", "is_tail_of", "relation_instance"): [5] * cfg.model.hop_count,
         },
+        fact_relations=data["relation_instance"].train_fact_mask,
+        target_relations=data["relation_instance"].train_target_mask,
         batch_size=cfg.train.batch_size,
         num_negative=cfg.task.num_negative,
     )
@@ -77,6 +99,7 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
                 
                 
                 
+                # TODO: delete the relation_instance node of the relation to predict when training
                 pred = parallel_model(batch)
                 target = torch.cat((
                     torch.ones(batch.batch_size, dtype=pred.dtype, device=pred.device),
@@ -115,7 +138,7 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
         if rank == 0:
             logger.warning(separator)
             logger.warning("Evaluate on valid")
-        result = test(cfg, model, valid_data, filtered_data=filtered_data, device=device, logger=logger)
+        result = test(cfg, model, data, split='valid', device=device, logger=logger)
         if result > best_result:
             best_result = result
             best_epoch = epoch
@@ -128,25 +151,47 @@ def train_and_validate(cfg, model, train_data, valid_data, device, logger, filte
 
 
 @torch.no_grad()
-def test(cfg, model, test_data, device, logger, filtered_data=None, return_metrics=False):
+def test(cfg, model, data: ReifiedGraph, split: Literal['valid', 'test'], device, logger, return_metrics=False):
     world_size = util.get_world_size()
     rank = util.get_rank()
 
-    test_triplets = torch.cat([test_data.target_edge_index, test_data.target_edge_type.unsqueeze(0)]).t()
-    sampler = torch_data.DistributedSampler(test_triplets, world_size, rank)
+    if split == 'valid':
+        fact_relations = data["relation_instance"].valid_fact_mask
+        target_relations = data["relation_instance"].valid_target_mask
+    elif split == 'test':
+        fact_relations = data["relation_instance"].test_fact_mask
+        target_relations = data["relation_instance"].test_target_mask
+        
+    # TODO: use loader
+
+    # convert fact_relations and target_relations to lists of indices
+    fact_relations = get_input_relation_instance_nodes(data, fact_relations)
+
+    test_triplets = torch.stack([
+        data["relation_instance"].head_id[target_relations],
+        data["relation_instance"].tail_id[target_relations],
+        data["relation_instance"].type_id[target_relations]
+    ], dim=1)
+    sampler = torch_data.DistributedSampler(test_triplets, world_size, rank, shuffle=False)
     test_loader = torch_data.DataLoader(test_triplets, cfg.train.batch_size, sampler=sampler)
+
+    # build a subgraph from data with only fact relations
+    data = data.subgraph({"relation_instance": fact_relations}, keep_nodes=True)
+
+
+
     
     model.eval()
     rankings = []
     num_negatives = []
     tail_rankings, num_tail_negs = [], []  # for explicit tail-only evaluation needed for 5 datasets
     
-    x_dict = model(test_data)
+    x_dict = model(data)
     
     for batch in test_loader:
         
         batch_size = batch.size(0)
-        t_batch, h_batch = tasks.all_negative(test_data, batch)
+        t_batch, h_batch = tasks.all_negative(data, batch)
         
         # tail prediction
         heads = t_batch[:, :, 0].reshape(-1)
@@ -176,7 +221,7 @@ def test(cfg, model, test_data, device, logger, filtered_data=None, return_metri
         )
         h_pred = h_pred.reshape(batch_size, -1)
 
-        if filtered_data is None:
+        if True:  # filtered_data is None:
             # TODO
             # t_mask, h_mask = tasks.strict_negative_mask(test_data, batch)
             t_mask, h_mask = torch.ones_like(t_pred, dtype=torch.bool), torch.ones_like(h_pred, dtype=torch.bool)
@@ -285,14 +330,13 @@ if __name__ == "__main__":
     dataset = util.build_dataset(cfg)
     device = util.get_device(cfg)
 
-    train_data, valid_data, test_data = dataset.train_data, dataset.valid_data, dataset.test_data
-    train_data = train_data.to(device)
-    valid_data = valid_data.to(device)
-    test_data = test_data.to(device)
+    data = dataset[0]
+    data = data.to(device)
 
     model = ReiFM(
-        data=train_data,
+        data=data,
         hidden_channels=64,
+        hop_count=cfg.model.hop_count,
     )
 
     if "checkpoint" in cfg and cfg.checkpoint is not None:
@@ -302,6 +346,7 @@ if __name__ == "__main__":
     #model = pyg.compile(model, dynamic=True)
     model = model.to(device)
     
+    # TODO: make sure below behavior is implemented in all dataset constructors and remove it from here
     if task_name == "InductiveInference":
         # filtering for inductive datasets
         # Grail, MTDEA, HM datasets have validation sets based off the training graph
@@ -336,12 +381,12 @@ if __name__ == "__main__":
     # val_filtered_data = val_filtered_data.to(device)
     # test_filtered_data = test_filtered_data.to(device)
     
-    train_and_validate(cfg, model, train_data, valid_data, filtered_data=val_filtered_data, device=device, batch_per_epoch=cfg.train.batch_per_epoch, logger=logger)
+    train_and_validate(cfg, model, data, device=device, batch_per_epoch=cfg.train.batch_per_epoch, logger=logger)
     if util.get_rank() == 0:
         logger.warning(separator)
         logger.warning("Evaluate on valid")
-    test(cfg, model, valid_data, filtered_data=val_filtered_data, device=device, logger=logger)
+    test(cfg, model, data, split='valid', device=device, logger=logger)
     if util.get_rank() == 0:
         logger.warning(separator)
         logger.warning("Evaluate on test")
-    test(cfg, model, test_data, filtered_data=test_filtered_data, device=device, logger=logger)
+    test(cfg, model, data, split='test', device=device, logger=logger)

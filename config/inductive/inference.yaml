@@ -7,6 +7,7 @@ dataset:
 
 model:
   class: ReiFM
+  hop_count: 10
   relation_model:
     class: RelNBFNet
     input_dim: 64
@@ -26,7 +27,7 @@ model:
 
 task:
   name: InductiveInference
-  num_negative: 32
+  num_negative: 16
   strict_negative: false
   adversarial_temperature: 1
   metric: [mr, mrr, hits@1, hits@3, hits@10, hits@10_50]

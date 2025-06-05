@@ -6,25 +6,24 @@ from torch_geometric.data.hetero_data import HeteroData
 from torch_geometric.nn import SAGEConv, to_hetero
 
 
-from . import tasks, layers
+from . import layers
 from ultra.base_nbfnet import BaseNBFNet
 
 class GNN(torch.nn.Module):
-    def __init__(self, hidden_channels):
+    def __init__(self, hidden_channels, hop_count):
         super().__init__()
-        self.conv1 = SAGEConv(hidden_channels, hidden_channels)
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
-        self.conv3 = SAGEConv(hidden_channels, hidden_channels)
+        self.sage_convs = nn.ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(hop_count)])
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
-        x = self.conv3(x, edge_index)
+        for i, sage_conv in enumerate(self.sage_convs):
+            x = sage_conv(x, edge_index)
+            if i < len(self.sage_convs) - 1:
+                x = F.relu(x)
         return x
 
 
 class ReiFM(nn.Module):
 
-    def __init__(self, data: HeteroData, hidden_channels=64):
+    def __init__(self, data: HeteroData, hidden_channels=64, hop_count=2):
         # kept that because super Ultra sounds cool
         super(ReiFM, self).__init__()
         
@@ -34,7 +33,7 @@ class ReiFM(nn.Module):
         self.relation_instance_repr = nn.Parameter(torch.randn(hidden_channels) * std)
         self.relation_type_repr = nn.Parameter(torch.randn(hidden_channels) * std)
         
-        self.gnn = GNN(hidden_channels)
+        self.gnn = GNN(hidden_channels, hop_count)
         # Convert GNN model into a heterogeneous variant:
         self.gnn = to_hetero(self.gnn, metadata=data.metadata())
 
@@ -57,13 +56,13 @@ class ReiFM(nn.Module):
         # `edge_index_dict` holds all edge indices of all edge types
         x_dict = self.gnn(x_dict, batch.edge_index_dict)
         
-        if not hasattr(batch["relation_type"], "num_sampled_nodes"):
+        if not (hasattr(batch, "type_ids") and hasattr(batch, "head_ids") and hasattr(batch, "tail_ids")):
             return x_dict
         
         # total number of triples to predict (positive or negative)
-        total_triples_count = batch["relation_type"].num_sampled_nodes[0]  # or batch_size + (1+num_negative)
+        total_triples_count = batch.type_ids.shape[0]  # or batch_size + (1+num_negative)
         pred = self.mlp(
-            torch.cat((x_dict["node_instance"][:total_triples_count], x_dict["node_instance"][total_triples_count:total_triples_count*2], x_dict["relation_instance"][:total_triples_count]), dim=1)
+            torch.cat((x_dict["node_instance"][:total_triples_count], x_dict["node_instance"][total_triples_count:total_triples_count*2], x_dict["relation_type"][:total_triples_count]), dim=1)
         )
         return pred.squeeze(1)
 
