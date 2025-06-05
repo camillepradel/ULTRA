@@ -1,3 +1,4 @@
+import copy
 from functools import reduce
 from torch_scatter import scatter_add
 from torch_geometric.data import Data, HeteroData
@@ -5,6 +6,11 @@ from torch_geometric.data.datapipes import functional_transform
 from torch_geometric.transforms import BaseTransform
 import torch
 from typing import Any
+from torch import Tensor
+from torch_geometric.typing import NodeType
+from torch_geometric.utils import bipartite_subgraph
+
+from typing import Dict
 
 
 def edge_match(edge_index, query_index):
@@ -216,6 +222,53 @@ class ReifiedGraph(HeteroData):
         super().__init__(*args, **kwargs)
         self.original_node_types: list[str] = original_node_types
         self.original_relation_types: list[str] = original_relation_types
+
+    def subgraph(self, subset_dict: Dict[NodeType, Tensor], keep_nodes: bool = False) -> 'HeteroData':
+        r"""Version of HeteroData.subgraph() which allows to keep nodes in the generated subgraph (it only removes edges)
+        """
+        data = copy.copy(self)
+        subset_dict = copy.copy(subset_dict)
+
+        if not keep_nodes:
+            for node_type, subset in subset_dict.items():
+                for key, value in self[node_type].items():
+                    if key == 'num_nodes':
+                        if subset.dtype == torch.bool:
+                            data[node_type].num_nodes = int(subset.sum())
+                        else:
+                            data[node_type].num_nodes = subset.size(0)
+                    elif self[node_type].is_node_attr(key):
+                        data[node_type][key] = value[subset]
+                    else:
+                        data[node_type][key] = value
+
+        for edge_type in self.edge_types:
+            src, _, dst = edge_type
+
+            src_subset = subset_dict.get(src)
+            if src_subset is None:
+                src_subset = torch.arange(data[src].num_nodes)
+            dst_subset = subset_dict.get(dst)
+            if dst_subset is None:
+                dst_subset = torch.arange(data[dst].num_nodes)
+
+            edge_index, _, edge_mask = bipartite_subgraph(
+                (src_subset, dst_subset),
+                self[edge_type].edge_index,
+                relabel_nodes=not keep_nodes,
+                size=(self[src].num_nodes, self[dst].num_nodes),
+                return_edge_mask=True,
+            )
+
+            for key, value in self[edge_type].items():
+                if key == 'edge_index':
+                    data[edge_type].edge_index = edge_index
+                elif self[edge_type].is_edge_attr(key):
+                    data[edge_type][key] = value[edge_mask]
+                else:
+                    data[edge_type][key] = value
+
+        return data
     
     def get_relation_instance_repr(self, relation_instance_id: int) -> str:
         """
@@ -290,7 +343,7 @@ class ToReifiedGraph(BaseTransform):
         # relation_instance nodes
         reified_graph["relation_instance"].num_nodes = homo_data.num_edges
         for attr_name in homo_data.edge_attrs():
-            if attr_name == 'edge_type':
+            if attr_name in ['edge_type', 'edge_index']:
                 continue
             reified_graph["relation_instance"][attr_name] = homo_data[attr_name]
         # relation_type nodes
@@ -317,5 +370,10 @@ class ToReifiedGraph(BaseTransform):
         reified_graph["node_instance", "is_head_of", "relation_instance"].edge_index = torch.tensor([head_id, relation_instance_id], dtype=torch.long, device=device)
         reified_graph["relation_instance", "has_tail", "node_instance"].edge_index = torch.tensor([relation_instance_id, tail_id], dtype=torch.long, device=device)
         reified_graph["node_instance", "is_tail_of", "relation_instance"].edge_index = torch.tensor([tail_id, relation_instance_id], dtype=torch.long, device=device)
+        
+        # add attributes to relation_instance nodes in order to more efficiently remove them during training
+        reified_graph["relation_instance"].type_id = torch.tensor(relation_type_id, dtype=torch.long, device=device)
+        reified_graph["relation_instance"].head_id = torch.tensor(head_id, dtype=torch.long, device=device)
+        reified_graph["relation_instance"].tail_id = torch.tensor(tail_id, dtype=torch.long, device=device)
 
         return reified_graph

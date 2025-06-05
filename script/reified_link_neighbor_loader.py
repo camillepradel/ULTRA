@@ -1,33 +1,29 @@
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Union, Any, Iterator
+from collections.abc import Sequence
 
-from torch_geometric.data import Data, FeatureStore, GraphStore, HeteroData
-from torch_geometric.loader.node_loader import NodeLoader
+from torch_geometric.data import Data, HeteroData
 from torch_geometric.sampler import NeighborSampler
 from torch_geometric.sampler.base import SubgraphType
-from torch_geometric.typing import EdgeType, InputNodes, OptTensor
-
-from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
+from torch_geometric.typing import EdgeType, OptTensor
 
 import torch
 from torch import Tensor
 
-from torch_geometric.data import Data, FeatureStore, GraphStore, HeteroData
 from torch_geometric.loader.base import DataLoaderIterator
 from torch_geometric.loader.mixin import AffinityMixin
 from torch_geometric.loader.utils import (
     filter_custom_store,
     filter_data,
     filter_hetero_data,
-    get_input_nodes,
     infer_filter_per_worker,
 )
 from torch_geometric.sampler import (
-    BaseSampler,
     HeteroSamplerOutput,
     NodeSamplerInput,
     SamplerOutput,
 )
-from torch_geometric.typing import InputNodes, OptTensor
+
+from ultra.tasks import ReifiedGraph
 
 
 class NeighborSamplerMultipleSeedTypes(NeighborSampler):
@@ -50,15 +46,37 @@ class NeighborSamplerMultipleSeedTypes(NeighborSampler):
         return out
 
 
+# adapted from torch_geometric.loader.utils.get_input_nodes
+def get_input_relation_instance_nodes(
+    data: HeteroData,
+    input_relations: OptTensor,
+) -> Sequence:
+    def to_index(tensor):
+        if isinstance(tensor, Tensor) and tensor.dtype == torch.bool:
+            return tensor.nonzero(as_tuple=False).view(-1)
+        if not isinstance(tensor, Tensor):
+            return torch.tensor(tensor, dtype=torch.long)
+        return tensor
+
+    assert isinstance(data, HeteroData)
+
+    if input_relations is None:
+        return torch.arange(data["relation_instance"].num_nodes)
+    return to_index(input_relations)
+
+
+
 # adapted from NeighborLoader and its superclass NodeLoader
 # TODO: when it works, make it a subclass of NeighborLoader and remove the
 #       duplicated code
 class ReifiedLinkNeighborLoader(torch.utils.data.DataLoader, AffinityMixin):
     def __init__(
         self,
-        data: HeteroData,
+        data: ReifiedGraph,
         num_neighbors: Union[List[int], Dict[EdgeType, List[int]]],
-        # input_nodes: InputNodes = None, -> replaced by data.target_edge_index and data.target_edge_type
+        # input_nodes: InputNodes = None,
+        fact_relations: OptTensor = None,
+        target_relations: OptTensor = None,
         # input_time: OptTensor = None,
         replace: bool = False,
         subgraph_type: Union[SubgraphType, str] = 'directional',
@@ -75,19 +93,25 @@ class ReifiedLinkNeighborLoader(torch.utils.data.DataLoader, AffinityMixin):
         num_negative: int = 32,
         **kwargs,
     ):
-        
-        self.num_negative = num_negative
+
+        # convert fact_relations and target_relations to lists of indices
+        fact_relations = get_input_relation_instance_nodes(data, fact_relations)
+        target_relations = get_input_relation_instance_nodes(data, target_relations)
+
+        # build a subgraph from data with only fact relations
+        self.data = data.subgraph({"relation_instance": fact_relations}, keep_nodes=True)
+
+        # store ids of nodes connected to the target relation_instance nodes
+        self.target_relation_instance_id = target_relations
+        self.target_relation_type_id = data["relation_instance"].type_id[target_relations]
+        self.target_relation_head_id = data["relation_instance"].head_id[target_relations]
+        self.target_relation_tail_id = data["relation_instance"].tail_id[target_relations]
         
         # from NeighborLoader __init__()
-        
-        # if input_time is not None and time_attr is None:
-        #     raise ValueError("Received conflicting 'input_time' and "
-        #                      "'time_attr' arguments: 'input_time' is set "
-        #                      "while 'time_attr' is not set.")
 
         if neighbor_sampler is None:
             neighbor_sampler = NeighborSamplerMultipleSeedTypes(
-                data,
+                self.data,
                 num_neighbors=num_neighbors,
                 replace=replace,
                 subgraph_type=subgraph_type,
@@ -99,17 +123,6 @@ class ReifiedLinkNeighborLoader(torch.utils.data.DataLoader, AffinityMixin):
                 share_memory=kwargs.get('num_workers', 0) > 0,
                 directed=directed,
             )
-
-        # super().__init__(
-        #     data=data,
-        #     node_sampler=neighbor_sampler,
-        #     input_nodes=input_nodes,
-        #     input_time=input_time,
-        #     transform=transform,
-        #     transform_sampler_output=transform_sampler_output,
-        #     filter_per_worker=filter_per_worker,
-        #     **kwargs,
-        # )
         
         # from NodeLoader __init__()
         
@@ -120,29 +133,14 @@ class ReifiedLinkNeighborLoader(torch.utils.data.DataLoader, AffinityMixin):
         kwargs.pop('dataset', None)
         kwargs.pop('collate_fn', None)
 
-        # # Get node type (or `None` for homogeneous graphs):
-        # input_type, input_nodes = get_input_nodes(data, input_nodes)
-
-        self.data = data
         self.node_sampler = neighbor_sampler  # node_sampler
         self.transform = transform
         self.transform_sampler_output = transform_sampler_output
         self.filter_per_worker = filter_per_worker
-        self.custom_cls = None  # custom_cls
+        self.custom_cls = None  # custom_cls        
+        self.num_negative = num_negative
 
-        self.input_data_node_instance = NodeSamplerInput(
-            input_id=None,  # input_id,
-            node=data.target_edge_index.T,
-            input_type="node_instance",
-        )
-
-        self.input_data_relation_type = NodeSamplerInput(
-            input_id=None,  # input_id,
-            node=data.target_edge_type,
-            input_type="relation_type"
-        )
-
-        iterator = range(data.target_edge_index.size(1))
+        iterator = range(target_relations.size(0))
         super().__init__(iterator, collate_fn=self.collate_fn, **kwargs)
 
     def __call__(
@@ -157,36 +155,69 @@ class ReifiedLinkNeighborLoader(torch.utils.data.DataLoader, AffinityMixin):
 
     def collate_fn(self, index: Union[Tensor, List[int]]) -> Any:
         r"""Samples a subgraph from a batch of input nodes."""
-        input_data_node_instance: NodeSamplerInput = self.input_data_node_instance[index]
-        input_data_relation_type: NodeSamplerInput = self.input_data_relation_type[index]
+        if isinstance(index, (list, tuple)):
+            index = torch.tensor(index)
+        target_relation_type_id = self.target_relation_type_id[index]
+        target_relation_head_id = self.target_relation_head_id[index]
+        target_relation_tail_id = self.target_relation_tail_id[index]
         
         # add negative samples
         if self.num_negative > 0:
-            # TODO: support strict sampling to reified graphs
-        
-            # generate negative samples for node instances
-            neg_node_instance = torch.randint(
-                self.data["node_instance"].num_nodes, (len(index) * self.num_negative, 2)
-            )
-            input_data_node_instance.node = torch.cat(
-                [input_data_node_instance.node, neg_node_instance]
-            )
+            # TODO: support strict sampling of reified graphs
 
-            # generate negative samples for relation types
-            neg_relation_type = torch.randint(
-                self.data["relation_type"].num_nodes, (len(index) * self.num_negative,)
-            )
-            input_data_relation_type.node = torch.cat(
-                [input_data_relation_type.node, neg_relation_type]
-            )
+            target_relation_type_id = target_relation_type_id.repeat_interleave(1 + self.num_negative)
+            num_negative_tails = self.num_negative // 2
+            num_negative_heads = self.num_negative - num_negative_tails
+            target_relation_head_id = torch.cat([
+                target_relation_head_id,
+                target_relation_head_id.repeat_interleave(num_negative_tails),
+                torch.randint(
+                    self.data["node_instance"].num_nodes, (len(index) * num_negative_heads,)
+                ),
+            ])
+            target_relation_tail_id = torch.cat([
+                target_relation_tail_id,
+                torch.randint(
+                    self.data["node_instance"].num_nodes, (len(index) * num_negative_heads,)
+                ),
+                target_relation_tail_id.repeat_interleave(num_negative_tails),
+            ])
 
-        # flatten node instance indices
-        input_data_node_instance.node = input_data_node_instance.node.T.reshape((-1,))
+        # node_instance_ids = torch.cat([head_ids, tail_ids])
+        node_instance_input = NodeSamplerInput(
+            input_id=index,
+            node=torch.cat([target_relation_head_id, target_relation_tail_id]),
+            input_type="node_instance",
+        )
+        relation_type_input = NodeSamplerInput(
+            input_id=index,
+            node=target_relation_type_id,
+            input_type="relation_type",
+        )
 
-        out = self.node_sampler.sample_from_nodes_multiple_seed_types([input_data_node_instance, input_data_relation_type])
+        out = self.node_sampler.sample_from_nodes_multiple_seed_types([relation_type_input, node_instance_input])
 
         if self.filter_per_worker:  # Execute `filter_fn` in the worker process
             out = self.filter_fn(out)
+
+        # TODO: check what happens with below fields when filter_fn is called in the main process
+        out.type_ids = target_relation_type_id
+        out.head_ids = target_relation_head_id
+        out.tail_ids = target_relation_tail_id
+
+        # sampling is performed on the fact relations only, but in some cases (typically during training), 
+        # fact relations are also used as target relations
+        # For this reason, we need to remove from the sampled graph the target relation_instance nodes which
+        # are used as seeds for this batch
+        # TODO: find out if we can replace this step with more efficient ones, like:
+        #  - deleting edges by directly manipulating edge_index
+        #  - setting num_neighbors so that the target relation_instance nodes are not sampled (this can work only for some edges and can be complementary to the above)
+        relation_instance_to_keep = torch.arange(out["relation_instance"].num_nodes, dtype=torch.long)[torch.stack([out["relation_instance"].n_id!=i for i in self.target_relation_instance_id[index]]).all(dim=0)]
+        out = out.subgraph({"relation_instance": relation_instance_to_keep}, keep_nodes=True)
+
+        # FIXME: something is odd: when comparing out before and after call to subgraph(), 3 has_head relations have disapeared instead of two (batch sier is 2)
+        # this is because relation_instance with id 0 was related to 2 node_instance nodes instead of 1
+        # this should be investigated        
 
         return out
 
